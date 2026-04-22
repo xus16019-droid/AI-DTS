@@ -6,9 +6,12 @@ import gradio as gr
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
 
-from agents.orchestrator import run_workflow
+from agents.orchestrator import run_workflow, AgentOrchestrator
 from tools.doc_generator import generate_report
 from config import settings
+
+# 全局状态存储
+workflow_states = {}
 
 
 def process_deviation(
@@ -22,7 +25,7 @@ def process_deviation(
     sequence_7: float,
     sequence_8: float,
     hinge_type: str
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, str, bool, bool]:
     input_data = {
         "supervisor": supervisor.strip() if supervisor else "",
         "hinge_type": hinge_type.strip() if hinge_type else "",
@@ -44,9 +47,39 @@ def process_deviation(
     
     result = run_workflow(input_data)
     
-    if result.get("status") != "completed":
-        return f"处理失败: {result.get('error', '未知错误')}", "", ""
+    if result.get("status") == "error":
+        return f"处理失败: {result.get('error', '未知错误')}", "", "", "", False, False
     
+    if result.get("status") == "awaiting_human_approval":
+        # 生成唯一ID来跟踪这个工作流
+        workflow_id = f"{datetime.now().timestamp()}"
+        workflow_states[workflow_id] = result
+        
+        parsed_data = result.get("parsed_data", {})
+        solutions = result.get("solutions_for_approval", [])
+        
+        report_text = "【输入数据】\n"
+        report_text += f"监理公司: {parsed_data.get('supervisor', 'N/A')}\n"
+        report_text += f"铰点型号: {parsed_data.get('hinge_type', 'N/A')}\n"
+        
+        if "deviation_1_4" in parsed_data:
+            report_text += f"序号1-4偏心量: {parsed_data['deviation_1_4']} mm ({parsed_data.get('deviation_1_4_range', 'N/A')})\n"
+        
+        if "deviation_5_8" in parsed_data:
+            report_text += f"序号5-8偏心量: {parsed_data['deviation_5_8']} mm ({parsed_data.get('deviation_5_8_range', 'N/A')})\n"
+        
+        report_text += "\n【处理方案】\n"
+        
+        for i, sol in enumerate(solutions, 1):
+            report_text += f"\n方案 {i}:\n"
+            report_text += f"  规则ID: {sol.get('rule_id', 'N/A')}\n"
+            report_text += f"  数据来源: {sol.get('source', 'N/A')}\n"
+            report_text += f"  置信度: {sol.get('confidence', 'N/A')}\n"
+            report_text += f"  处理方案: {sol.get('solution', 'N/A')}\n"
+        
+        return report_text, "", f"需要人工审核", workflow_id, True, False
+    
+    # 处理完成的情况
     parsed_data = result.get("parsed_data", {})
     solutions = result.get("final_solution", [])
     
@@ -69,9 +102,60 @@ def process_deviation(
         report_text += f"  置信度: {sol.get('confidence', 'N/A')}\n"
         report_text += f"  处理方案: {sol.get('solution', 'N/A')}\n"
     
+    if result.get("human_comments"):
+        report_text += f"\n【审核意见】\n{result.get('human_comments')}\n"
+    
     doc_path = generate_report(input_data, parsed_data, solutions)
     
-    return report_text, doc_path, f"处理完成！报告已保存至: {doc_path}"
+    return report_text, doc_path, f"处理完成！报告已保存至: {doc_path}", "", False, True
+
+
+def approve_solution(workflow_id: str, comments: str) -> Tuple[str, str, str, bool, bool]:
+    if workflow_id not in workflow_states:
+        return "错误: 未找到对应的工作流", "", "", False, False
+    
+    state = workflow_states[workflow_id]
+    solutions = state.get("solutions_for_approval", [])
+    
+    # 创建协调器并处理审核
+    orchestrator = AgentOrchestrator()
+    result = orchestrator.approve_solution(state, solutions, comments)
+    
+    if result.get("status") == "error":
+        return f"审核处理失败: {result.get('error', '未知错误')}", "", "", False, False
+    
+    parsed_data = result.get("parsed_data", {})
+    approved_solutions = result.get("final_solution", [])
+    
+    report_text = "【输入数据】\n"
+    report_text += f"监理公司: {parsed_data.get('supervisor', 'N/A')}\n"
+    report_text += f"铰点型号: {parsed_data.get('hinge_type', 'N/A')}\n"
+    
+    if "deviation_1_4" in parsed_data:
+        report_text += f"序号1-4偏心量: {parsed_data['deviation_1_4']} mm ({parsed_data.get('deviation_1_4_range', 'N/A')})\n"
+    
+    if "deviation_5_8" in parsed_data:
+        report_text += f"序号5-8偏心量: {parsed_data['deviation_5_8']} mm ({parsed_data.get('deviation_5_8_range', 'N/A')})\n"
+    
+    report_text += "\n【处理方案】\n"
+    
+    for i, sol in enumerate(approved_solutions, 1):
+        report_text += f"\n方案 {i}:\n"
+        report_text += f"  规则ID: {sol.get('rule_id', 'N/A')}\n"
+        report_text += f"  数据来源: {sol.get('source', 'N/A')}\n"
+        report_text += f"  置信度: {sol.get('confidence', 'N/A')}\n"
+        report_text += f"  处理方案: {sol.get('solution', 'N/A')}\n"
+    
+    if result.get("human_comments"):
+        report_text += f"\n【审核意见】\n{result.get('human_comments')}\n"
+    
+    input_data = state.get("input_data", {})
+    doc_path = generate_report(input_data, parsed_data, approved_solutions)
+    
+    # 清理工作流状态
+    del workflow_states[workflow_id]
+    
+    return report_text, doc_path, "审核完成！报告已生成", False, True
 
 
 def create_interface():
@@ -86,6 +170,7 @@ def create_interface():
         2. 填写序号数值（序号1-4或序号5-8，至少填写一组）
         3. 选择铰点型号（如有）
         4. 点击"生成处理方案"按钮
+        5. 对于需要人工审核的方案，填写审核意见并点击"确认方案"
         """)
         
         with gr.Row():
@@ -133,17 +218,63 @@ def create_interface():
                     interactive=False
                 )
                 
-                doc_output = gr.File(label="下载Word报告")
+                doc_output = gr.File(label="下载Word报告", visible=True)
+                
+                # 人工审核部分
+                workflow_id = gr.Textbox(label="工作流ID", visible=False)
+                
+                approval_section = gr.Column(visible=False)
+                with approval_section:
+                    gr.Markdown("### 人工审核")
+                    comments = gr.Textbox(
+                        label="审核意见",
+                        placeholder="请输入审核意见（可选）",
+                        lines=3
+                    )
+                    approve_btn = gr.Button("确认方案", variant="secondary", size="lg")
+        
+        # 创建状态管理函数
+        def handle_process_deviation(*args):
+            result = process_deviation(*args)
+            report_text, doc_path, status, wf_id, approval_visible, doc_visible = result
+            
+            # 更新组件状态
+            approval_section.visible = approval_visible
+            doc_output.visible = doc_visible
+            
+            if doc_path:
+                doc_output.value = doc_path
+            
+            return report_text, status, wf_id
+        
+        def handle_approve_solution(workflow_id, comments):
+            result = approve_solution(workflow_id, comments)
+            report_text, doc_path, status, approval_visible, doc_visible = result
+            
+            # 更新组件状态
+            approval_section.visible = approval_visible
+            doc_output.visible = doc_visible
+            
+            if doc_path:
+                doc_output.value = doc_path
+            
+            return report_text, status
         
         submit_btn.click(
-            fn=process_deviation,
+            fn=handle_process_deviation,
             inputs=[
                 supervisor,
                 sequence_1, sequence_2, sequence_3, sequence_4,
                 sequence_5, sequence_6, sequence_7, sequence_8,
                 hinge_type
             ],
-            outputs=[report_output, doc_output, status_output]
+            outputs=[report_output, status_output, workflow_id]
+        )
+        
+        approve_btn.click(
+            fn=handle_approve_solution,
+            inputs=[workflow_id, comments],
+            outputs=[report_output, status_output]
         )
         
         gr.Markdown("""

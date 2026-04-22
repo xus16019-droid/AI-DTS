@@ -42,12 +42,37 @@ class AgentOrchestrator:
         workflow.add_edge("data_parser", "rule_retriever")
         workflow.add_edge("rule_retriever", "solution_generator")
         workflow.add_edge("solution_generator", "human_loop")
-        workflow.add_edge("human_loop", "doc_layout")
+        
+        # 添加条件边来处理人工审核状态
+        def check_approval_needed(state):
+            if state.get("status") == "awaiting_human_approval":
+                return "awaiting_approval"
+            return "doc_layout"
+        
+        workflow.add_conditional_edges(
+            "human_loop",
+            check_approval_needed,
+            {
+                "awaiting_approval": END,
+                "doc_layout": "doc_layout"
+            }
+        )
+        
         workflow.add_edge("doc_layout", END)
         
         self.graph = workflow.compile()
         
         print(f"[{self.name}] 工作流构建完成")
+    
+    def approve_solution(self, state: AgentState, approved_solutions: list, comments: str = "") -> AgentState:
+        """处理人工审核结果并继续工作流"""
+        state = self.human_loop.approve_solution(state, approved_solutions, comments)
+        
+        # 继续执行工作流
+        if state.get("status") == "confirmed":
+            state = self.doc_layout.process(state)
+        
+        return state
     
     def run(self, input_data: Dict[str, Any]) -> AgentState:
         print("\n" + "=" * 60)

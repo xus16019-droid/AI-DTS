@@ -16,8 +16,10 @@ class AgentState(TypedDict):
     parsed_data: Optional[Dict[str, Any]]
     matched_rules: Optional[List[Dict[str, Any]]]
     vector_results: Optional[List[Dict[str, Any]]]
-    solution: Optional[str]
-    final_solution: Optional[str]
+    solution: Optional[List[Dict[str, Any]]]
+    solutions_for_approval: Optional[List[Dict[str, Any]]]
+    final_solution: Optional[List[Dict[str, Any]]]
+    human_comments: Optional[str]
     document_path: Optional[str]
     error: Optional[str]
     status: str
@@ -268,13 +270,40 @@ class HumanLoopAgent:
             
             print("\n  " + "=" * 50)
             
-            state["final_solution"] = solutions
-            state["status"] = "confirmed"
+            # 检查是否需要人工审核
+            needs_human_approval = any(sol.get('confidence') in ['低', '中'] for sol in solutions)
             
-            print(f"[{self.name}] 方案已确认")
+            if needs_human_approval:
+                state["status"] = "awaiting_human_approval"
+                state["solutions_for_approval"] = solutions
+                print(f"[{self.name}] 方案需要人工审核")
+            else:
+                state["final_solution"] = solutions
+                state["status"] = "confirmed"
+                print(f"[{self.name}] 方案已自动确认")
             
         except Exception as e:
             state["error"] = f"人机协同错误: {str(e)}"
+            state["status"] = "error"
+            print(f"[{self.name}] 错误: {e}")
+        
+        return state
+    
+    def approve_solution(self, state: AgentState, approved_solutions: list, comments: str = "") -> AgentState:
+        """处理人工审核结果"""
+        print(f"\n[{self.name}] 处理人工审核结果...")
+        
+        try:
+            state["final_solution"] = approved_solutions
+            state["human_comments"] = comments
+            state["status"] = "confirmed"
+            
+            print(f"[{self.name}] 方案已通过人工审核")
+            if comments:
+                print(f"[{self.name}] 审核意见: {comments}")
+            
+        except Exception as e:
+            state["error"] = f"人工审核处理错误: {str(e)}"
             state["status"] = "error"
             print(f"[{self.name}] 错误: {e}")
         
